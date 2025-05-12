@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import os
-import uuid
 from ultralytics import YOLO
 
 class MeterProcessor:
@@ -11,8 +10,6 @@ class MeterProcessor:
         self.analog_model = YOLO(analog_model_path)
         self.class_names = {0: 'analogico', 1: 'digital'}
         self.input_folder = input_folder
-        os.makedirs('cropped/analogico', exist_ok=True)
-        os.makedirs('cropped/digital', exist_ok=True)
         os.makedirs('predict/analogico/obb', exist_ok=True)
         os.makedirs('predict/analogico/pain', exist_ok=True)
         os.makedirs('predict/digital/obb', exist_ok=True)
@@ -142,16 +139,12 @@ class MeterProcessor:
                 box_points = all_boxes[best_box_idx].astype(np.float32)
                 warped = self.crop_rotated_roi(image, box_points)
 
-                cropped_filename = f"cropped/{meter_type}/{meter_type}_{str(uuid.uuid4())[:8]}.png"
-                cv2.imwrite(cropped_filename, warped)
-
                 model = self.digital_model if meter_type == 'digital' else self.analog_model
                 number = self.predict_and_plot(model, warped, image_file, meter_type, show)
 
                 results.append({
                     'image': image_file,
                     'type': meter_type,
-                    'cropped_image': cropped_filename,
                     'detected_number': number
                 })
             else:
@@ -167,4 +160,4 @@ if __name__ == "__main__":
     processor = MeterProcessor(crop_model_path, digital_model_path, analog_model_path, input_folder)
     results = processor.process_images(show=False)
     for res in results:
-        print(f"Imagen: {res['image']} - Tipo: {res['type']} - Guardada en: {res['cropped_image']} - Número: {res['detected_number']}")
+        print(f"Imagen: {res['image']} - Tipo: {res['type']} - Número: {res['detected_number']}")
