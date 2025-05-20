@@ -3,13 +3,18 @@ import numpy as np
 import os
 from ultralytics import YOLO
 
+
 class MeterProcessor:
-    def __init__(self, crop_model_path, digital_model_path, analog_model_path, input_folder):
+    def __init__(self, crop_model_path, digital_model_path, analog_model_path, input_folder, scale_factor=4,
+                 conf_threshold=0):
         self.crop_model = YOLO(crop_model_path)
         self.digital_model = YOLO(digital_model_path)
         self.analog_model = YOLO(analog_model_path)
         self.class_names = {0: 'analogico', 1: 'digital'}
         self.input_folder = input_folder
+        self.scale_factor = scale_factor
+        self.conf_threshold = conf_threshold
+        self.digit_priority = {d: i for i, d in enumerate([1, 0, 2, 3, 4, 5, 6, 7, 8, 9])}
         os.makedirs('predict/analogico/obb', exist_ok=True)
         os.makedirs('predict/analogico/pain', exist_ok=True)
         os.makedirs('predict/digital/obb', exist_ok=True)
@@ -72,16 +77,52 @@ class MeterProcessor:
                 best_idx = idx
         return best_idx
 
+    def preprocess_image(self, image):
+        global resize_image
+        if self.scale_factor > 1:
+            resize_image = cv2.resize(image, None, fx=self.scale_factor, fy=self.scale_factor,
+                                        interpolation=cv2.INTER_CUBIC)
+
+        return resize_image
+
     def predict_and_plot(self, model, image, image_file, meter_type, show=False):
         results = model.predict(image)
         digits = []
-        for box, cls in zip(results[0].obb.xyxyxyxy, results[0].obb.cls):
-            x1 = box[0][0].item()
-            digit = int(cls.item())
-            digits.append((x1, digit, box))
+        for box, cls, conf in zip(results[0].obb.xyxyxyxy, results[0].obb.cls, results[0].obb.conf):
+            if conf.item() >= self.conf_threshold:
+                x1 = box[0][0].item()
+                digit = int(cls.item())
+                digits.append((x1, digit, box, conf.item()))
+
+        filtered_digits = []
         digits.sort(key=lambda x: x[0])
-        number = ''.join(str(d[1]) for d in digits)
-        print(f"Imagen: {image_file} - Tipo: {meter_type} - Número detectado: {number}")
+        i = 0
+        while i < len(digits):
+            current_x1, current_digit, current_box, current_conf = digits[i]
+            similar_digits = [(current_x1, current_digit, current_box, current_conf)]
+            j = i + 1
+            while j < len(digits) and abs(digits[j][0] - current_x1) < 10:
+                similar_digits.append(digits[j])
+                j += 1
+            if len(similar_digits) > 1:
+                best_digit = max(similar_digits, key=lambda x: (x[3], -self.digit_priority[x[1]]))
+                filtered_digits.append(best_digit)
+            else:
+                filtered_digits.append(similar_digits[0])
+            i = j
+
+        filtered_digits.sort(key=lambda x: x[0])
+        number = ''.join(str(d[1]) for d in filtered_digits)
+
+        if meter_type == 'digital' and len(filtered_digits) > 1:
+            areas = [cv2.contourArea(np.array(d[2].cpu(), dtype=np.float32)) for d in filtered_digits]
+            if len(areas) > 1:
+                avg_area = np.mean(areas[:-1])
+                last_area = areas[-1]
+                if last_area < 0.9 * avg_area:
+                    number = number[:-1] + '.' + number[-1]
+                elif len(filtered_digits) >= 7:
+                    number = number[:-1] + '.' + number[-1]
 
         plotted_image = results[0].plot()
         height, width, _ = plotted_image.shape
@@ -97,14 +138,12 @@ class MeterProcessor:
 
         output_obb_path = os.path.join(f'predict/{meter_type}/obb', f"pred_{image_file}")
         cv2.imwrite(output_obb_path, extended_image_obb)
-        print(f"Guardado (con OBBs): {output_obb_path}")
 
         extended_image_pain = np.ones((height, width + extension_width, 3), dtype=np.uint8) * 255
         extended_image_pain[:, :width, :] = image
         cv2.putText(extended_image_pain, number, text_position, font, font_scale, font_color, thickness)
         output_pain_path = os.path.join(f'predict/{meter_type}/pain', f"pred_{image_file}")
         cv2.imwrite(output_pain_path, extended_image_pain)
-        print(f"Guardado (sin OBBs): {output_pain_path}")
 
         if show:
             cv2.imshow(f'Dígitos detectados en {image_file}', extended_image_obb)
@@ -138,7 +177,7 @@ class MeterProcessor:
                 meter_type = self.class_names[cls]
                 box_points = all_boxes[best_box_idx].astype(np.float32)
                 warped = self.crop_rotated_roi(image, box_points)
-
+                warped = self.preprocess_image(warped)
                 model = self.digital_model if meter_type == 'digital' else self.analog_model
                 number = self.predict_and_plot(model, warped, image_file, meter_type, show)
 
@@ -152,12 +191,11 @@ class MeterProcessor:
 
         return results
 
+
 if __name__ == "__main__":
     crop_model_path = './model_recorte.pt'
-    digital_model_path = './model02.pt'
-    analog_model_path = './model01.pt'
+    digital_model_path = './models/best01.pt'
+    analog_model_path = './models/best.pt'
     input_folder = './images'
-    processor = MeterProcessor(crop_model_path, digital_model_path, analog_model_path, input_folder)
+    processor = MeterProcessor(crop_model_path, digital_model_path, analog_model_path, input_folder, scale_factor=4)
     results = processor.process_images(show=False)
-    for res in results:
-        print(f"Imagen: {res['image']} - Tipo: {res['type']} - Número: {res['detected_number']}")
