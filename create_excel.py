@@ -25,9 +25,9 @@ def extract_suministro_sucursal(filename):
 
 
 def generate_excel_from_images():
-    crop_model_path = './model_recorte.pt'
+    crop_model_path = 'models/model_recorte.pt'
     digital_model_path = 'models/best-digital.pt'
-    analog_model_path = './models/best-electronico.pt'
+    analog_model_path = 'models/best-electronico.pt'
     input_folder = './images'
 
     print("Iniciando procesamiento de imágenes...")

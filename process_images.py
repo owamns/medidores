@@ -10,15 +10,15 @@ class MeterProcessor:
         self.crop_model = YOLO(crop_model_path)
         self.digital_model = YOLO(digital_model_path)
         self.analog_model = YOLO(analog_model_path)
-        self.class_names = {0: 'analogico', 1: 'digital'}
+        self.class_names = {0: 'e', 1: 'd'}
         self.input_folder = input_folder
         self.scale_factor = scale_factor
         self.conf_threshold = conf_threshold
         self.digit_priority = {d: i for i, d in enumerate([1, 0, 2, 3, 4, 5, 6, 7, 8, 9])}
-        os.makedirs('predict/analogico/obb', exist_ok=True)
-        os.makedirs('predict/analogico/pain', exist_ok=True)
-        os.makedirs('predict/digital/obb', exist_ok=True)
-        os.makedirs('predict/digital/pain', exist_ok=True)
+        os.makedirs('predict/e/obb', exist_ok=True)
+        os.makedirs('predict/e/pain', exist_ok=True)
+        os.makedirs('predict/d/obb', exist_ok=True)
+        os.makedirs('predict/d/pain', exist_ok=True)
 
     def rotate_image(self, image, angle):
         h, w = image.shape[:2]
@@ -81,10 +81,102 @@ class MeterProcessor:
         global resize_image
         if self.scale_factor > 1:
             resize_image = cv2.resize(image, None, fx=self.scale_factor, fy=self.scale_factor,
-                                     interpolation=cv2.INTER_CUBIC)
+                                      interpolation=cv2.INTER_CUBIC)
         else:
             resize_image = image
         return resize_image
+
+    def calculate_overlap(self, box1, box2):
+        if hasattr(box1, 'cpu'):
+            box1 = box1.cpu().numpy()
+        if hasattr(box2, 'cpu'):
+            box2 = box2.cpu().numpy()
+
+        if box1.shape[0] != 4 or box2.shape[0] != 4:
+            return 0.0
+
+        try:
+            poly1 = box1.astype(np.float32)
+            poly2 = box2.astype(np.float32)
+
+            intersection_result, intersection_poly = cv2.intersectConvexConvex(poly1, poly2)
+
+            if intersection_result <= 0 or intersection_poly is None:
+                return 0.0
+
+            if len(intersection_poly) < 3:
+                return 0.0
+
+            intersection_area = cv2.contourArea(intersection_poly)
+
+            area1 = cv2.contourArea(poly1)
+            area2 = cv2.contourArea(poly2)
+
+            if area1 <= 0 or area2 <= 0:
+                return 0.0
+
+            overlap_ratio = intersection_area / min(area1, area2)
+            return overlap_ratio
+
+        except Exception as e:
+            return self.calculate_overlap_fallback(box1, box2)
+
+    def calculate_overlap_fallback(self, box1, box2):
+        center1 = np.mean(box1, axis=0)
+        center2 = np.mean(box2, axis=0)
+
+        distance = np.linalg.norm(center1 - center2)
+
+        def get_avg_size(box):
+            side1 = np.linalg.norm(box[1] - box[0])
+            side2 = np.linalg.norm(box[2] - box[1])
+            side3 = np.linalg.norm(box[3] - box[2])
+            side4 = np.linalg.norm(box[0] - box[3])
+            width = (side1 + side3) / 2
+            height = (side2 + side4) / 2
+            return (width + height) / 2
+
+        avg_size1 = get_avg_size(box1)
+        avg_size2 = get_avg_size(box2)
+        min_size = min(avg_size1, avg_size2)
+
+        if distance < min_size * 0.5:
+            overlap_estimate = max(0, 1.0 - (distance / (min_size * 0.5)))
+            return overlap_estimate
+
+        return 0.0
+
+    def filter_overlapping_digits(self, digits, overlap_threshold=0.3):
+        """Filtra dígitos que se solapan significativamente"""
+        if len(digits) <= 1:
+            return digits
+
+        filtered_digits = []
+        used_indices = set()
+
+        for i, (x1_i, digit_i, box_i, conf_i) in enumerate(digits):
+            if i in used_indices:
+                continue
+
+            overlapping_group = [(x1_i, digit_i, box_i, conf_i, i)]
+
+            for j, (x1_j, digit_j, box_j, conf_j) in enumerate(digits):
+                if j != i and j not in used_indices:
+                    overlap = self.calculate_overlap(box_i, box_j)
+                    if overlap > overlap_threshold:
+                        overlapping_group.append((x1_j, digit_j, box_j, conf_j, j))
+
+            if len(overlapping_group) > 1:
+                best_digit = max(overlapping_group, key=lambda x: (x[3], -self.digit_priority[x[1]]))
+                filtered_digits.append((best_digit[0], best_digit[1], best_digit[2], best_digit[3]))
+
+                for item in overlapping_group:
+                    used_indices.add(item[4])
+            else:
+                filtered_digits.append((x1_i, digit_i, box_i, conf_i))
+                used_indices.add(i)
+
+        return filtered_digits
 
     def predict_and_plot(self, model, image, image_file, meter_type, show=False):
         results = model.predict(image)
@@ -95,36 +187,46 @@ class MeterProcessor:
                 digit = int(cls.item())
                 digits.append((x1, digit, box, conf.item()))
 
-        filtered_digits = []
         digits.sort(key=lambda x: x[0])
+
+        filtered_digits = self.filter_overlapping_digits(digits, overlap_threshold=0.5)
+
+        final_digits = []
         i = 0
-        while i < len(digits):
-            current_x1, current_digit, current_box, current_conf = digits[i]
+        while i < len(filtered_digits):
+            current_x1, current_digit, current_box, current_conf = filtered_digits[i]
             similar_digits = [(current_x1, current_digit, current_box, current_conf)]
             j = i + 1
-            while j < len(digits) and abs(digits[j][0] - current_x1) < 10:
-                similar_digits.append(digits[j])
+
+            while j < len(filtered_digits) and abs(filtered_digits[j][0] - current_x1) < 5:
+                similar_digits.append(filtered_digits[j])
                 j += 1
+
             if len(similar_digits) > 1:
+                print(f"Advertencia: Dígitos muy cercanos detectados en x={current_x1:.1f}")
                 best_digit = max(similar_digits, key=lambda x: (x[3], -self.digit_priority[x[1]]))
-                filtered_digits.append(best_digit)
+                final_digits.append(best_digit)
             else:
-                filtered_digits.append(similar_digits[0])
+                final_digits.append(similar_digits[0])
             i = j
 
-        filtered_digits.sort(key=lambda x: x[0])
-        number = ''.join(str(d[1]) for d in filtered_digits)
+        final_digits.sort(key=lambda x: x[0])
+        number = ''.join(str(d[1]) for d in final_digits)
 
-        if meter_type == 'analogico' and len(filtered_digits) >= 6:
+        print(f"Dígitos detectados en {image_file}: {[d[1] for d in final_digits]} -> {number}")
+
+        if meter_type == 'e' and len(final_digits) >= 6:
             number = number[:-1] + '.' + number[-1]
-        elif meter_type == 'digital' and len(filtered_digits) > 1:
-            areas = [cv2.contourArea(np.array(d[2].cpu(), dtype=np.float32)) for d in filtered_digits]
+        elif meter_type == 'd' and len(final_digits) > 1:
+            areas = [cv2.contourArea(np.array(d[2].cpu(), dtype=np.float32)) for d in final_digits]
             if len(areas) > 1:
                 avg_area = np.mean(areas[:-1])
                 last_area = areas[-1]
                 if last_area < 0.9 * avg_area:
                     number = number[:-1] + '.' + number[-1]
-                elif len(filtered_digits) >= 7:
+                elif len(final_digits) == 8:
+                    number = number[:-2] + '.' + number[-2:]
+                elif len(final_digits) == 7:
                     number = number[:-1] + '.' + number[-1]
 
         try:
@@ -188,7 +290,7 @@ class MeterProcessor:
                 box_points = all_boxes[best_box_idx].astype(np.float32)
                 warped = self.crop_rotated_roi(image, box_points)
                 warped = self.preprocess_image(warped)
-                model = self.digital_model if meter_type == 'digital' else self.analog_model
+                model = self.digital_model if meter_type == 'd' else self.analog_model
                 number = self.predict_and_plot(model, warped, image_file, meter_type, show)
 
                 results.append({
@@ -200,3 +302,11 @@ class MeterProcessor:
                 print(f"No se seleccionó ninguna caja en: {image_path}")
 
         return results
+
+if __name__ == "__main__":
+    crop_model_path = 'models/model_recorte.pt'
+    digital_model_path = 'models/best-digital.pt'
+    analog_model_path = 'models/best-electronico.pt'
+    input_folder = './images'
+    processor = MeterProcessor(crop_model_path, digital_model_path, analog_model_path, input_folder, scale_factor=4)
+    results = processor.process_images(show=False)
