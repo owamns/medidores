@@ -81,8 +81,9 @@ class MeterProcessor:
         global resize_image
         if self.scale_factor > 1:
             resize_image = cv2.resize(image, None, fx=self.scale_factor, fy=self.scale_factor,
-                                        interpolation=cv2.INTER_CUBIC)
-
+                                     interpolation=cv2.INTER_CUBIC)
+        else:
+            resize_image = image
         return resize_image
 
     def predict_and_plot(self, model, image, image_file, meter_type, show=False):
@@ -114,7 +115,9 @@ class MeterProcessor:
         filtered_digits.sort(key=lambda x: x[0])
         number = ''.join(str(d[1]) for d in filtered_digits)
 
-        if meter_type == 'digital' and len(filtered_digits) > 1:
+        if meter_type == 'analogico' and len(filtered_digits) >= 6:
+            number = number[:-1] + '.' + number[-1]
+        elif meter_type == 'digital' and len(filtered_digits) > 1:
             areas = [cv2.contourArea(np.array(d[2].cpu(), dtype=np.float32)) for d in filtered_digits]
             if len(areas) > 1:
                 avg_area = np.mean(areas[:-1])
@@ -123,6 +126,13 @@ class MeterProcessor:
                     number = number[:-1] + '.' + number[-1]
                 elif len(filtered_digits) >= 7:
                     number = number[:-1] + '.' + number[-1]
+
+        try:
+            number_float = float(number.lstrip('0') or '0')
+            display_number = str(number_float).rstrip('0').rstrip('.')
+        except ValueError:
+            display_number = number
+            number_float = None
 
         plotted_image = results[0].plot()
         height, width, _ = plotted_image.shape
@@ -134,14 +144,14 @@ class MeterProcessor:
         font_color = (0, 0, 0)
         thickness = 2
         text_position = (width + 10, height // 2)
-        cv2.putText(extended_image_obb, number, text_position, font, font_scale, font_color, thickness)
+        cv2.putText(extended_image_obb, display_number, text_position, font, font_scale, font_color, thickness)
 
         output_obb_path = os.path.join(f'predict/{meter_type}/obb', f"pred_{image_file}")
         cv2.imwrite(output_obb_path, extended_image_obb)
 
         extended_image_pain = np.ones((height, width + extension_width, 3), dtype=np.uint8) * 255
         extended_image_pain[:, :width, :] = image
-        cv2.putText(extended_image_pain, number, text_position, font, font_scale, font_color, thickness)
+        cv2.putText(extended_image_pain, display_number, text_position, font, font_scale, font_color, thickness)
         output_pain_path = os.path.join(f'predict/{meter_type}/pain', f"pred_{image_file}")
         cv2.imwrite(output_pain_path, extended_image_pain)
 
@@ -150,7 +160,7 @@ class MeterProcessor:
             cv2.waitKey(0)
             cv2.destroyAllWindows()
 
-        return number
+        return number_float if number_float is not None else number
 
     def process_images(self, show=False):
         results = []
@@ -190,12 +200,3 @@ class MeterProcessor:
                 print(f"No se seleccionó ninguna caja en: {image_path}")
 
         return results
-
-
-if __name__ == "__main__":
-    crop_model_path = './model_recorte.pt'
-    digital_model_path = './models/best01.pt'
-    analog_model_path = './models/best.pt'
-    input_folder = './images'
-    processor = MeterProcessor(crop_model_path, digital_model_path, analog_model_path, input_folder, scale_factor=4)
-    results = processor.process_images(show=False)
