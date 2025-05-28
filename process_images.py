@@ -5,20 +5,14 @@ from ultralytics import YOLO
 
 
 class MeterProcessor:
-    def __init__(self, crop_model_path, digital_model_path, analog_model_path, input_folder, scale_factor=4,
-                 conf_threshold=0):
+    def __init__(self, crop_model_path, digital_model_path, electronic_model_path, scale_factor=4, conf_threshold=0):
         self.crop_model = YOLO(crop_model_path)
         self.digital_model = YOLO(digital_model_path)
-        self.analog_model = YOLO(analog_model_path)
+        self.electronic_model = YOLO(electronic_model_path)
         self.class_names = {0: 'e', 1: 'd'}
-        self.input_folder = input_folder
         self.scale_factor = scale_factor
         self.conf_threshold = conf_threshold
-        self.digit_priority = {d: i for i, d in enumerate([1, 0, 2, 3, 4, 5, 6, 7, 8, 9])}
-        os.makedirs('predict/e/obb', exist_ok=True)
-        os.makedirs('predict/e/pain', exist_ok=True)
-        os.makedirs('predict/d/obb', exist_ok=True)
-        os.makedirs('predict/d/pain', exist_ok=True)
+        self.digit_priority = {d: i for i, d in enumerate([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])}
 
     def rotate_image(self, image, angle):
         h, w = image.shape[:2]
@@ -78,7 +72,6 @@ class MeterProcessor:
         return best_idx
 
     def preprocess_image(self, image):
-        global resize_image
         if self.scale_factor > 1:
             resize_image = cv2.resize(image, None, fx=self.scale_factor, fy=self.scale_factor,
                                       interpolation=cv2.INTER_CUBIC)
@@ -118,7 +111,7 @@ class MeterProcessor:
             overlap_ratio = intersection_area / min(area1, area2)
             return overlap_ratio
 
-        except Exception as e:
+        except Exception:
             return self.calculate_overlap_fallback(box1, box2)
 
     def calculate_overlap_fallback(self, box1, box2):
@@ -147,7 +140,6 @@ class MeterProcessor:
         return 0.0
 
     def filter_overlapping_digits(self, digits, overlap_threshold=0.3):
-        """Filtra dígitos que se solapan significativamente"""
         if len(digits) <= 1:
             return digits
 
@@ -179,7 +171,6 @@ class MeterProcessor:
         return filtered_digits
 
     def has_valid_digits(self, model, image):
-        """Verifica si el modelo puede detectar dígitos válidos en la imagen"""
         try:
             results = model.predict(image)
             if not hasattr(results[0], 'obb') or results[0].obb is None:
@@ -191,11 +182,10 @@ class MeterProcessor:
                     digits.append(True)
 
             return len(digits) > 0
-        except Exception as e:
-            print(f"Error al verificar dígitos: {e}")
+        except Exception:
             return False
 
-    def predict_and_plot(self, model, image, image_file, meter_type, show=False, save_outputs=True):
+    def predict_digits(self, model, image, meter_type):
         results = model.predict(image)
         digits = []
 
@@ -227,7 +217,6 @@ class MeterProcessor:
                 j += 1
 
             if len(similar_digits) > 1:
-                print(f"Advertencia: Dígitos muy cercanos detectados en x={current_x1:.1f}")
                 best_digit = max(similar_digits, key=lambda x: (x[3], -self.digit_priority[x[1]]))
                 final_digits.append(best_digit)
             else:
@@ -240,8 +229,6 @@ class MeterProcessor:
             return None
 
         number = ''.join(str(d[1]) for d in final_digits)
-
-        print(f"Dígitos detectados en {image_file} (tipo {meter_type}): {[d[1] for d in final_digits]} -> {number}")
 
         if meter_type == 'e' and len(final_digits) >= 6:
             number = number[:-1] + '.' + number[-1]
@@ -259,112 +246,71 @@ class MeterProcessor:
 
         try:
             number_float = float(number.lstrip('0') or '0')
-            display_number = str(number_float).rstrip('0').rstrip('.')
+            return number_float
         except ValueError:
-            display_number = number
-            number_float = None
+            return number
 
-        if save_outputs:
-            plotted_image = results[0].plot()
-            height, width, _ = plotted_image.shape
-            extension_width = 200
-            extended_image_obb = np.ones((height, width + extension_width, 3), dtype=np.uint8) * 255
-            extended_image_obb[:, :width, :] = plotted_image
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 1
-            font_color = (0, 0, 0)
-            thickness = 2
-            text_position = (width + 10, height // 2)
-            cv2.putText(extended_image_obb, display_number, text_position, font, font_scale, font_color, thickness)
-
-            output_obb_path = os.path.join(f'predict/{meter_type}/obb', f"pred_{image_file}")
-            cv2.imwrite(output_obb_path, extended_image_obb)
-
-            extended_image_pain = np.ones((height, width + extension_width, 3), dtype=np.uint8) * 255
-            extended_image_pain[:, :width, :] = image
-            cv2.putText(extended_image_pain, display_number, text_position, font, font_scale, font_color, thickness)
-            output_pain_path = os.path.join(f'predict/{meter_type}/pain', f"pred_{image_file}")
-            cv2.imwrite(output_pain_path, extended_image_pain)
-
-            if show:
-                cv2.imshow(f'Dígitos detectados en {image_file}', extended_image_obb)
-                cv2.waitKey(0)
-                cv2.destroyAllWindows()
-
-        return number_float if number_float is not None else number
-
-    def try_both_models(self, warped, image_file, initial_meter_type, show=False):
-
+    def try_both_models(self, warped, initial_meter_type):
         if initial_meter_type == 'd':
             primary_model = self.digital_model
-            secondary_model = self.analog_model
+            secondary_model = self.electronic_model
             secondary_type = 'e'
-        else:  # initial_meter_type == 'e'
-            primary_model = self.analog_model
+        else:
+            primary_model = self.electronic_model
             secondary_model = self.digital_model
             secondary_type = 'd'
 
-        print(f"Intentando con modelo {initial_meter_type} primero...")
-
-        # Intentar con el modelo principal (sin guardar outputs)
-        result = self.predict_and_plot(primary_model, warped, image_file, initial_meter_type, show, save_outputs=False)
+        result = self.predict_digits(primary_model, warped, initial_meter_type)
 
         if result is not None and result != 0:
-            print(f"Éxito con modelo {initial_meter_type}")
-            # Guardar los outputs con el modelo exitoso
-            final_result = self.predict_and_plot(primary_model, warped, image_file, initial_meter_type, show,
-                                                 save_outputs=True)
-            return final_result, initial_meter_type
+            return result, initial_meter_type
 
-        print(f"Modelo {initial_meter_type} no encontró dígitos válidos, intentando con modelo {secondary_type}...")
-
-        # Intentar con el modelo secundario
-        result = self.predict_and_plot(secondary_model, warped, image_file, secondary_type, show, save_outputs=True)
+        result = self.predict_digits(secondary_model, warped, secondary_type)
 
         if result is not None and result != 0:
-            print(f"Éxito con modelo {secondary_type}")
             return result, secondary_type
 
-        print(f"Ningún modelo pudo detectar dígitos válidos en {image_file}")
         return 0, initial_meter_type
 
-    def process_images(self, show=False):
+    def process_image(self, image):
+        det = self.crop_model.predict(image)[0]
+        if not hasattr(det, 'obb'):
+            return {'detected_number': 0, 'meter_type': None, 'error': f'No se detecto objetos en {image}'}
+
+        all_boxes = det.obb.xyxyxyxy.cpu().numpy().reshape(-1, 4, 2)
+        all_cls = det.obb.cls.cpu().numpy()
+        best_box_idx = self.select_largest_side(all_boxes)
+
+        if best_box_idx is not None:
+            cls = int(all_cls[best_box_idx])
+            initial_meter_type = self.class_names[cls]
+            box_points = all_boxes[best_box_idx].astype(np.float32)
+            warped = self.crop_rotated_roi(image, box_points)
+            warped = self.preprocess_image(warped)
+
+            number, final_meter_type = self.try_both_models(warped, initial_meter_type)
+
+            return {
+                'image': image,
+                'meter_type': final_meter_type,
+                'detected_number': number
+            }
+        else:
+            return {'detected_number': 0, 'meter_type': None, 'error': 'No se seleccionó ninguna casilla válida'}
+
+    def process_images_from_folder(self, input_folder):
         results = []
-        image_files = [f for f in os.listdir(self.input_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        image_files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
 
         for image_file in image_files:
-            image_path = os.path.join(self.input_folder, image_file)
+            image_path = os.path.join(input_folder, image_file)
             image = cv2.imread(image_path)
             if image is None:
-                print(f"No se pudo leer la imagen: {image_path}")
                 continue
 
-            det = self.crop_model.predict(image)[0]
-            if not hasattr(det, 'obb'):
-                print(f"No se detectaron objetos en: {image_path}")
-                continue
-
-            all_boxes = det.obb.xyxyxyxy.cpu().numpy().reshape(-1, 4, 2)
-            all_cls = det.obb.cls.cpu().numpy()
-            best_box_idx = self.select_largest_side(all_boxes)
-
-            if best_box_idx is not None:
-                cls = int(all_cls[best_box_idx])
-                initial_meter_type = self.class_names[cls]
-                box_points = all_boxes[best_box_idx].astype(np.float32)
-                warped = self.crop_rotated_roi(image, box_points)
-                warped = self.preprocess_image(warped)
-
-                number, final_meter_type = self.try_both_models(warped, image_file, initial_meter_type, show)
-
-                results.append({
-                    'image': image_file,
-                    'initial_type': initial_meter_type,
-                    'final_type': final_meter_type,
-                    'detected_number': number
-                })
-            else:
-                print(f"No se seleccionó ninguna caja en: {image_path}")
+            result = self.process_image(image)
+            result['image'] = image_file
+            results.append(result)
 
         return results
 
@@ -372,7 +318,5 @@ class MeterProcessor:
 if __name__ == "__main__":
     crop_model_path = 'models/model_recorte.pt'
     digital_model_path = 'models/best-digital.pt'
-    analog_model_path = 'models/best-electronico.pt'
-    input_folder = './images'
-    processor = MeterProcessor(crop_model_path, digital_model_path, analog_model_path, input_folder, scale_factor=4)
-    results = processor.process_images(show=False)
+    electronic_model_path = 'models/best-electronico.pt'
+    processor = MeterProcessor(crop_model_path, digital_model_path, electronic_model_path, scale_factor=4)
