@@ -178,14 +178,38 @@ class MeterProcessor:
 
         return filtered_digits
 
-    def predict_and_plot(self, model, image, image_file, meter_type, show=False):
+    def has_valid_digits(self, model, image):
+        """Verifica si el modelo puede detectar dígitos válidos en la imagen"""
+        try:
+            results = model.predict(image)
+            if not hasattr(results[0], 'obb') or results[0].obb is None:
+                return False
+
+            digits = []
+            for box, cls, conf in zip(results[0].obb.xyxyxyxy, results[0].obb.cls, results[0].obb.conf):
+                if conf.item() >= self.conf_threshold:
+                    digits.append(True)
+
+            return len(digits) > 0
+        except Exception as e:
+            print(f"Error al verificar dígitos: {e}")
+            return False
+
+    def predict_and_plot(self, model, image, image_file, meter_type, show=False, save_outputs=True):
         results = model.predict(image)
         digits = []
+
+        if not hasattr(results[0], 'obb') or results[0].obb is None:
+            return None
+
         for box, cls, conf in zip(results[0].obb.xyxyxyxy, results[0].obb.cls, results[0].obb.conf):
             if conf.item() >= self.conf_threshold:
                 x1 = box[0][0].item()
                 digit = int(cls.item())
                 digits.append((x1, digit, box, conf.item()))
+
+        if not digits:
+            return None
 
         digits.sort(key=lambda x: x[0])
 
@@ -211,9 +235,13 @@ class MeterProcessor:
             i = j
 
         final_digits.sort(key=lambda x: x[0])
+
+        if not final_digits:
+            return None
+
         number = ''.join(str(d[1]) for d in final_digits)
 
-        print(f"Dígitos detectados en {image_file}: {[d[1] for d in final_digits]} -> {number}")
+        print(f"Dígitos detectados en {image_file} (tipo {meter_type}): {[d[1] for d in final_digits]} -> {number}")
 
         if meter_type == 'e' and len(final_digits) >= 6:
             number = number[:-1] + '.' + number[-1]
@@ -236,33 +264,69 @@ class MeterProcessor:
             display_number = number
             number_float = None
 
-        plotted_image = results[0].plot()
-        height, width, _ = plotted_image.shape
-        extension_width = 200
-        extended_image_obb = np.ones((height, width + extension_width, 3), dtype=np.uint8) * 255
-        extended_image_obb[:, :width, :] = plotted_image
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 1
-        font_color = (0, 0, 0)
-        thickness = 2
-        text_position = (width + 10, height // 2)
-        cv2.putText(extended_image_obb, display_number, text_position, font, font_scale, font_color, thickness)
+        if save_outputs:
+            plotted_image = results[0].plot()
+            height, width, _ = plotted_image.shape
+            extension_width = 200
+            extended_image_obb = np.ones((height, width + extension_width, 3), dtype=np.uint8) * 255
+            extended_image_obb[:, :width, :] = plotted_image
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 1
+            font_color = (0, 0, 0)
+            thickness = 2
+            text_position = (width + 10, height // 2)
+            cv2.putText(extended_image_obb, display_number, text_position, font, font_scale, font_color, thickness)
 
-        output_obb_path = os.path.join(f'predict/{meter_type}/obb', f"pred_{image_file}")
-        cv2.imwrite(output_obb_path, extended_image_obb)
+            output_obb_path = os.path.join(f'predict/{meter_type}/obb', f"pred_{image_file}")
+            cv2.imwrite(output_obb_path, extended_image_obb)
 
-        extended_image_pain = np.ones((height, width + extension_width, 3), dtype=np.uint8) * 255
-        extended_image_pain[:, :width, :] = image
-        cv2.putText(extended_image_pain, display_number, text_position, font, font_scale, font_color, thickness)
-        output_pain_path = os.path.join(f'predict/{meter_type}/pain', f"pred_{image_file}")
-        cv2.imwrite(output_pain_path, extended_image_pain)
+            extended_image_pain = np.ones((height, width + extension_width, 3), dtype=np.uint8) * 255
+            extended_image_pain[:, :width, :] = image
+            cv2.putText(extended_image_pain, display_number, text_position, font, font_scale, font_color, thickness)
+            output_pain_path = os.path.join(f'predict/{meter_type}/pain', f"pred_{image_file}")
+            cv2.imwrite(output_pain_path, extended_image_pain)
 
-        if show:
-            cv2.imshow(f'Dígitos detectados en {image_file}', extended_image_obb)
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
+            if show:
+                cv2.imshow(f'Dígitos detectados en {image_file}', extended_image_obb)
+                cv2.waitKey(0)
+                cv2.destroyAllWindows()
 
         return number_float if number_float is not None else number
+
+    def try_both_models(self, warped, image_file, initial_meter_type, show=False):
+
+        if initial_meter_type == 'd':
+            primary_model = self.digital_model
+            secondary_model = self.analog_model
+            secondary_type = 'e'
+        else:  # initial_meter_type == 'e'
+            primary_model = self.analog_model
+            secondary_model = self.digital_model
+            secondary_type = 'd'
+
+        print(f"Intentando con modelo {initial_meter_type} primero...")
+
+        # Intentar con el modelo principal (sin guardar outputs)
+        result = self.predict_and_plot(primary_model, warped, image_file, initial_meter_type, show, save_outputs=False)
+
+        if result is not None and result != 0:
+            print(f"Éxito con modelo {initial_meter_type}")
+            # Guardar los outputs con el modelo exitoso
+            final_result = self.predict_and_plot(primary_model, warped, image_file, initial_meter_type, show,
+                                                 save_outputs=True)
+            return final_result, initial_meter_type
+
+        print(f"Modelo {initial_meter_type} no encontró dígitos válidos, intentando con modelo {secondary_type}...")
+
+        # Intentar con el modelo secundario
+        result = self.predict_and_plot(secondary_model, warped, image_file, secondary_type, show, save_outputs=True)
+
+        if result is not None and result != 0:
+            print(f"Éxito con modelo {secondary_type}")
+            return result, secondary_type
+
+        print(f"Ningún modelo pudo detectar dígitos válidos en {image_file}")
+        return 0, initial_meter_type
 
     def process_images(self, show=False):
         results = []
@@ -286,22 +350,24 @@ class MeterProcessor:
 
             if best_box_idx is not None:
                 cls = int(all_cls[best_box_idx])
-                meter_type = self.class_names[cls]
+                initial_meter_type = self.class_names[cls]
                 box_points = all_boxes[best_box_idx].astype(np.float32)
                 warped = self.crop_rotated_roi(image, box_points)
                 warped = self.preprocess_image(warped)
-                model = self.digital_model if meter_type == 'd' else self.analog_model
-                number = self.predict_and_plot(model, warped, image_file, meter_type, show)
+
+                number, final_meter_type = self.try_both_models(warped, image_file, initial_meter_type, show)
 
                 results.append({
                     'image': image_file,
-                    'type': meter_type,
+                    'initial_type': initial_meter_type,
+                    'final_type': final_meter_type,
                     'detected_number': number
                 })
             else:
                 print(f"No se seleccionó ninguna caja en: {image_path}")
 
         return results
+
 
 if __name__ == "__main__":
     crop_model_path = 'models/model_recorte.pt'
