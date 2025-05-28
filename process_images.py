@@ -9,7 +9,7 @@ class MeterProcessor:
         self.crop_model = YOLO(crop_model_path)
         self.digital_model = YOLO(digital_model_path)
         self.electronic_model = YOLO(electronic_model_path)
-        self.class_names = {0: 'e', 1: 'd'}
+        self.class_names = {0: 'd', 1: 'e'}
         self.scale_factor = scale_factor
         self.conf_threshold = conf_threshold
         self.digit_priority = {d: i for i, d in enumerate([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])}
@@ -316,7 +316,7 @@ class MeterProcessor:
 
 
 if __name__ == "__main__":
-    crop_model_path = 'models/model_recorte.pt'
+    crop_model_path = 'models/best-recorte.pt'
     digital_model_path = 'models/best-digital.pt'
     electronic_model_path = 'models/best-electronico.pt'
     processor = MeterProcessor(crop_model_path, digital_model_path, electronic_model_path, scale_factor=4)
