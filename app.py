@@ -18,7 +18,7 @@ processor = None
 def initialize_processor():
     global processor
     try:
-        crop_model_path = 'models/model_recorte.pt'
+        crop_model_path = 'models/best-recorte.pt'
         digital_model_path = 'models/best-digital.pt'
         electronic_model_path = 'models/best-electronico.pt'
 
@@ -250,7 +250,7 @@ def models_info():
     global processor
 
     model_info = {
-        'crop_model': 'models/model_recorte.pt',
+        'crop_model': 'models/best-recorte.pt',
         'digital_model': 'models/best-digital.pt',
         'electronic_model': 'models/best-electronico.pt'
     }
@@ -320,6 +320,6 @@ if __name__ == '__main__':
     else:
         print("Failed to initialize MeterProcessor. Please check your model files.")
         print("Expected model files:")
-        print("  - models/model_recorte.pt")
+        print("  - models/best-recorte.pt")
         print("  - models/best-digital.pt")
         print("  - models/best-electronico.pt")
