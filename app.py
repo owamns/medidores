@@ -7,10 +7,22 @@ import io
 from PIL import Image
 import os
 import traceback
+import logging
 from process_images import MeterProcessor
+
+# Configurar logging para producción
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
+
+# Configuración para producción - Centralizada con variables de entorno
+app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_CONTENT_LENGTH', 16 * 1024 * 1024))
+app.config['JSON_SORT_KEYS'] = False
 
 processor = None
 
@@ -18,24 +30,40 @@ processor = None
 def initialize_processor():
     global processor
     try:
-        crop_model_path = 'models/best-recorte.pt'
-        digital_model_path = 'models/best-digital.pt'
-        electronic_model_path = 'models/best-electronico.pt'
+        # Usar variables de entorno para rutas de modelos
+        crop_model_path = os.environ.get('CROP_MODEL_PATH', 'models/best-recorte.pt')
+        digital_model_path = os.environ.get('DIGITAL_MODEL_PATH', 'models/best-digital.pt')
+        electronic_model_path = os.environ.get('ELECTRONIC_MODEL_PATH', 'models/best-electronico.pt')
 
-        if not all(os.path.exists(path) for path in [crop_model_path, digital_model_path, electronic_model_path]):
-            raise FileNotFoundError("One or more model files not found")
+        missing_models = []
+        for name, path in [
+            ('crop', crop_model_path),
+            ('digital', digital_model_path),
+            ('electronic', electronic_model_path)
+        ]:
+            if not os.path.exists(path):
+                missing_models.append(f"{name}: {path}")
+
+        if missing_models:
+            logger.error(f"Missing model files: {', '.join(missing_models)}")
+            return False
+
+        # Usar variables de entorno para configuración
+        scale_factor = int(os.environ.get('SCALE_FACTOR', 4))
+        conf_threshold = float(os.environ.get('CONF_THRESHOLD', 0))
 
         processor = MeterProcessor(
             crop_model_path=crop_model_path,
             digital_model_path=digital_model_path,
             electronic_model_path=electronic_model_path,
-            scale_factor=4,
-            conf_threshold=0
+            scale_factor=scale_factor,
+            conf_threshold=conf_threshold
         )
-        print("MeterProcessor initialized successfully")
+        logger.info(
+            f"MeterProcessor initialized successfully with scale_factor={scale_factor}, conf_threshold={conf_threshold}")
         return True
     except Exception as e:
-        print(f"Error initializing MeterProcessor: {str(e)}")
+        logger.error(f"Error initializing MeterProcessor: {str(e)}")
         return False
 
 
@@ -43,13 +71,9 @@ def base64_to_cv2(base64_string):
     try:
         if base64_string.startswith('data:image'):
             base64_string = base64_string.split(',')[1]
-
         image_data = base64.b64decode(base64_string)
-
         pil_image = Image.open(io.BytesIO(image_data))
-
         cv2_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-
         return cv2_image
     except Exception as e:
         raise ValueError(f"Invalid base64 image: {str(e)}")
@@ -58,17 +82,13 @@ def base64_to_cv2(base64_string):
 def validate_image(image):
     if image is None:
         return False, "Image is None"
-
     if len(image.shape) != 3:
         return False, "Image must be a color image (3 channels)"
-
     height, width = image.shape[:2]
     if height < 50 or width < 50:
         return False, "Image too small (minimum 50x50 pixels)"
-
     if height > 5000 or width > 5000:
         return False, "Image too large (maximum 5000x5000 pixels)"
-
     return True, "Valid image"
 
 
@@ -85,8 +105,8 @@ def health_check():
 @app.route('/process-meter', methods=['POST'])
 def process_meter():
     global processor
-
     if processor is None:
+        logger.error("Processor not initialized")
         return jsonify({
             'success': False,
             'error': 'Processor not initialized',
@@ -102,7 +122,6 @@ def process_meter():
             }), 400
 
         data = request.get_json()
-
         if 'image' not in data:
             return jsonify({
                 'success': False,
@@ -143,13 +162,13 @@ def process_meter():
 
         if 'error' in result:
             response['data']['processing_error'] = result['error']
+            logger.warning(f"Processing error: {result['error']}")
 
         return jsonify(response)
 
     except Exception as e:
-        print(f"Error processing meter: {str(e)}")
-        print(traceback.format_exc())
-
+        logger.error(f"Error processing meter: {str(e)}")
+        logger.error(traceback.format_exc())
         return jsonify({
             'success': False,
             'error': 'Processing error',
@@ -160,8 +179,8 @@ def process_meter():
 @app.route('/process-meter-file', methods=['POST'])
 def process_meter_file():
     global processor
-
     if processor is None:
+        logger.error("Processor not initialized")
         return jsonify({
             'success': False,
             'error': 'Processor not initialized',
@@ -177,7 +196,6 @@ def process_meter_file():
             }), 400
 
         file = request.files['file']
-
         if file.filename == '':
             return jsonify({
                 'success': False,
@@ -187,7 +205,6 @@ def process_meter_file():
 
         allowed_extensions = {'png', 'jpg', 'jpeg', 'bmp', 'tiff'}
         file_extension = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
-
         if file_extension not in allowed_extensions:
             return jsonify({
                 'success': False,
@@ -231,13 +248,13 @@ def process_meter_file():
 
         if 'error' in result:
             response['data']['processing_error'] = result['error']
+            logger.warning(f"Processing error: {result['error']}")
 
         return jsonify(response)
 
     except Exception as e:
-        print(f"Error processing meter file: {str(e)}")
-        print(traceback.format_exc())
-
+        logger.error(f"Error processing meter file: {str(e)}")
+        logger.error(traceback.format_exc())
         return jsonify({
             'success': False,
             'error': 'Processing error',
@@ -248,7 +265,6 @@ def process_meter_file():
 @app.route('/models/info', methods=['GET'])
 def models_info():
     global processor
-
     model_info = {
         'crop_model': 'models/best-recorte.pt',
         'digital_model': 'models/best-digital.pt',
@@ -301,25 +317,24 @@ def request_entity_too_large(error):
 
 
 if __name__ == '__main__':
+    # Solo para desarrollo/testing local
+    # En producción se usa Gunicorn
     if initialize_processor():
-        print("Starting Flask API server...")
-        print("Available endpoints:")
-        print("  GET  /health - Health check")
-        print("  POST /process-meter - Process base64 encoded image")
-        print("  POST /process-meter-file - Process uploaded image file")
-        print("  GET  /models/info - Get model information")
+        logger.info("Starting Flask API server in development mode...")
+        logger.info("For production, use: gunicorn --config gunicorn.conf.py app:app")
 
-        app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
-
+        port = int(os.environ.get('PORT', 5000))
         app.run(
             host='0.0.0.0',
-            port=5000,
+            port=port,
             debug=False,
             threaded=True
         )
     else:
-        print("Failed to initialize MeterProcessor. Please check your model files.")
-        print("Expected model files:")
-        print("  - models/best-recorte.pt")
-        print("  - models/best-digital.pt")
-        print("  - models/best-electronico.pt")
+        logger.error("Failed to initialize MeterProcessor. Please check your model files.")
+        exit(1)
+
+# Inicializar el processor al importar el módulo (para Gunicorn)
+if not initialize_processor():
+    logger.error("Failed to initialize MeterProcessor during module import")
+    raise RuntimeError("Cannot initialize MeterProcessor")
