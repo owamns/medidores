@@ -1,49 +1,51 @@
-# Usar una imagen base de Python con OpenCV preinstalado
-FROM python:3.12-slim
+FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
 
-# Instalar dependencias del sistema necesarias para OpenCV y otras librerías
+ENV DEBIAN_FRONTEND=noninteractive
+
 RUN apt-get update && apt-get install -y \
-  libopencv-dev \
-  libglib2.0-0 \
-  libsm6 \
-  libxext6 \
-  libxrender-dev \
-  libgomp1 \
-  libgcc-s1 \
-  wget \
-  && rm -rf /var/lib/apt/lists/*
+    python3-dev \
+    python3-venv \
+    libopencv-dev \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    libgcc-s1 \
+    wget \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Establecer el directorio de trabajo
+# Crear entorno virtual para evitar conflictos con paquetes del sistema
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Instalar pip y actualizarlo
+RUN pip install --upgrade pip
+
 WORKDIR /app
 
-# Copiar requirements.txt primero para aprovechar el cache de Docker
 COPY requirements.txt .
 
-# Instalar dependencias de Python
+# Instalar PyTorch con soporte CUDA
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+# Instalar el resto de dependencias en el entorno virtual
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Crear directorio para los modelos
-RUN mkdir -p models
-
-# Copiar el código de la aplicación
+# Copiar archivos de la aplicación
 COPY app.py .
 COPY process_images.py .
 COPY gunicorn.conf.py .
-
-# Copiar los modelos (asegúrate de que existan en tu proyecto)
 COPY models/ ./models/
 
-# Crear un usuario no-root para seguridad
-RUN useradd -m -u 1000 appuser
+# Crear directorios necesarios para el usuario
+RUN useradd -m -u 1000 appuser && \
+    mkdir -p /home/appuser/.config/Ultralytics /home/appuser/.cache && \
+    chown -R appuser:appuser /home/appuser/.config /home/appuser/.cache /app
 
-# Crear directorio de configuración para Ultralytics y darle permisos
-RUN mkdir -p /home/appuser/.config/Ultralytics && \
-  chown -R appuser:appuser /home/appuser/.config
-
-# Cambiar permisos de la aplicación
-RUN chown -R appuser:appuser /app
-
+# Cambiar al usuario no-root
 USER appuser
 
-# Comando para ejecutar la aplicación con Gunicorn
+# Comando por defecto
 CMD ["gunicorn", "--config", "gunicorn.conf.py", "app:app"]
