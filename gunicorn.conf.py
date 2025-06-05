@@ -1,4 +1,7 @@
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Server socket
 bind = f"0.0.0.0:{os.environ.get('PORT', 5000)}"
